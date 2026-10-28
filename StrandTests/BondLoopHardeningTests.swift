@@ -13,6 +13,18 @@ import CoreBluetooth
 ///    user has since freed, while never re-entering the refusal hammer.
 final class BondLoopHardeningTests: XCTestCase {
 
+    func testFailedPausedAttemptRetainsRemainingCooldown() {
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 2), 598)
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 599), 1)
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 600), 0)
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 900), 0)
+    }
+
+    func testPausedRetryWaitIsBoundedAcrossClockRollback() {
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: -3600), 600)
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: nil), 600)
+    }
+
     // MARK: isInsufficientAuthError (hole 1)
 
     /// The two ATT codes classify by CODE, regardless of what the (possibly localized) text says.
