@@ -13,16 +13,11 @@ import CoreBluetooth
 ///    user has since freed, while never re-entering the refusal hammer.
 final class BondLoopHardeningTests: XCTestCase {
 
-    func testFailedPausedAttemptRetainsRemainingCooldown() {
-        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 2), 598)
-        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 599), 1)
-        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 600), 0)
-        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: 900), 0)
-    }
-
-    func testPausedRetryWaitIsBoundedAcrossClockRollback() {
-        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: -3600), 600)
-        XCTAssertEqual(BLEManager.bondLoopRetryDelay(secondsSinceAttempt: nil), 600)
+    func testPausedRecoveryBackoffCapsWithoutGivingUp() {
+        XCTAssertEqual((0...8).map { BLEManager.bondLoopRetryDelay(attempt: $0) },
+                       [5, 10, 20, 40, 60, 60, 60, 60, 60])
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(attempt: Int.max), 60)
+        XCTAssertEqual(BLEManager.bondLoopRetryDelay(attempt: -1), 5)
     }
 
     // MARK: isInsufficientAuthError (hole 1)

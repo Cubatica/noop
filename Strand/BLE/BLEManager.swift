@@ -1253,10 +1253,12 @@ public final class BLEManager: NSObject, ObservableObject {
             if !autoReconnectPausedForBondLoop {
                 bondLoopRetryWork?.cancel()
                 bondLoopRetryWork = nil
+                bondLoopRetryAttempt = 0
             }
         }
     }
     private var bondLoopRetryWork: DispatchWorkItem?
+    private var bondLoopRetryAttempt = 0
     /// When the bond-loop pause last tripped (or last salvage-probed). Drives the #78 hole-4 salvage
     /// probe's 10-minute floor (`shouldSalvageProbe`): a paused strap the user has since FREED self-heals
     /// on the next app-foreground instead of staying disconnected until a manual Connect, while a strap
@@ -1918,11 +1920,10 @@ public final class BLEManager: NSObject, ObservableObject {
         return s >= bondLoopSalvageFloorSeconds
     }
 
-    /// Keep the existing ten-minute refusal floor, but never lose the retry when an attempt
-    /// fails before it expires. Clamp clock rollback to one window rather than an unbounded wait.
-    nonisolated static func bondLoopRetryDelay(secondsSinceAttempt: TimeInterval?) -> TimeInterval {
-        min(bondLoopSalvageFloorSeconds,
-            max(0, bondLoopSalvageFloorSeconds - (secondsSinceAttempt ?? 0)))
+    /// A failed parked request must be retried without a hot loop or an indefinite pause.
+    /// Saturate before exponentiation so even a long-running failure streak cannot overflow.
+    nonisolated static func bondLoopRetryDelay(attempt: Int) -> TimeInterval {
+        min(60, 5 * pow(2, Double(min(4, max(0, attempt)))))
     }
 
     /// #78 hole-1: classify a "the strap refused the encrypted bond" error by its ATT CODE first,
@@ -1963,35 +1964,25 @@ public final class BLEManager: NSObject, ObservableObject {
         connectFromSystem()
     }
 
-    /// #1539: park a standing connect while the bond-loop pause is latched, so the pause can end without
-    /// the user. Called from the paused disconnect branch and from the trip itself — both run while the app
-    /// is backgrounded, which is exactly where the foreground probe cannot reach. Re-stamps
-    /// `bondLoopPausedAt` so a strap that is reachable and still refusing gets one attempt per window
-    /// rather than a connect/refuse spin.
+    /// Retry a consumed standing connect with capped backoff. One scheduled retry at a time;
+    /// intentional disconnect and a recovered bond cancel it. A pending OS connect is left alone.
     func standingConnectWhilePausedIfDue(now: Date = Date(), justTripped: Bool = false) {
-        let since = justTripped ? nil : bondLoopPausedAt.map { now.timeIntervalSince($0) }
-        bondLoopRetryWork?.cancel()
-        bondLoopRetryWork = nil
         guard autoReconnectPausedForBondLoop, !state.connected, !intentionalDisconnect else { return }
-        guard BLEManager.shouldStandingConnectWhilePaused(
-            pausedForBondLoop: autoReconnectPausedForBondLoop,
-            connected: state.connected,
-            intentionalDisconnect: intentionalDisconnect,
-            secondsSincePauseTripped: since) else {
-            // A failed attempt consumed CoreBluetooth's parked request. Returning during the
-            // cooldown without scheduling its remainder leaves no request capable of recovering.
-            let wait = Self.bondLoopRetryDelay(secondsSinceAttempt: since)
-            let work = DispatchWorkItem { [weak self] in
-                self?.standingConnectWhilePausedIfDue()
-            }
-            bondLoopRetryWork = work
-            log("Bond-loop cooldown: retrying standing connect in \(Int(wait))s")
-            DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
-            return
+        guard bondLoopRetryWork == nil else { return }
+        let wait = Self.bondLoopRetryDelay(attempt: bondLoopRetryAttempt)
+        bondLoopRetryAttempt = min(4, bondLoopRetryAttempt + 1)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.bondLoopRetryWork = nil
+            guard self.autoReconnectPausedForBondLoop, !self.state.connected,
+                  !self.intentionalDisconnect else { return }
+            self.bondLoopPausedAt = Date()
+            self.log("Bond-loop recovery: parking a standing connect")
+            self.issueStandingConnect(whilePausedForBondLoop: true)
         }
-        bondLoopPausedAt = now
-        log("Bond-loop pause: parking a standing connect so the strap is claimed the moment it is reachable (#1539) - the give-up stays latched")
-        issueStandingConnect(whilePausedForBondLoop: true)
+        bondLoopRetryWork = work
+        log("Bond-loop cooldown: retrying standing connect in \(Int(wait))s")
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
     }
 
     /// Observe the app-foreground notification and run the salvage probe. Installed once per manager from
